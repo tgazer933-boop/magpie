@@ -204,18 +204,23 @@ func quant(x []float32) (q []uint8, scale float32, zp int32) {
 
 // matmul is x [rows, m.k] quantized, times m: float32(Σ (x-xz)(w-wz)) *
 // (xs*ws), as MatMulInteger, Cast and Mul do it, in out [rows, m.n], over
-// t goroutines. The
-// kernels take int8 on both sides, so x's uint8 q goes as q-128, and
-// Σ q·w = Σ (q-128)·w + 128·Σ w.
+// t goroutines. SSE2 and AVX2 use int8 activations q-128; AVX512 VNNI
+// uses the raw uint8 q. Each path applies its matching zero-point correction.
 func (m *qmat) matmul(x []float32, rows, t int) []float32 {
 	q, xs, xz := quant(x)
-	s := make([]int8, len(q))
+	useVNNI := dot4vnniFast != nil && m.k > 0 && m.k%64 == 0 && m.n%4 == 0
+	var s []int8
+	if !useVNNI {
+		s = make([]int8, len(q))
+	}
 	xsum := make([]int32, rows)
 	for r := 0; r < rows; r++ {
 		var sum int32
 		for i, v := range q[r*m.k : r*m.k+m.k] {
 			sum += int32(v)
-			s[r*m.k+i] = int8(int32(v) - 128)
+			if !useVNNI {
+				s[r*m.k+i] = int8(int32(v) - 128)
+			}
 		}
 		xsum[r] = sum
 	}
@@ -227,18 +232,27 @@ func (m *qmat) matmul(x []float32, rows, t int) []float32 {
 			c0 := 4 * g
 			nc := min(4, m.n-c0)
 			for r := 0; r < rows; r++ {
-				a := s[r*m.k : r*m.k+m.k]
-				if nc == 4 {
-					dot4(a, m.w[c0*m.k:(c0+4)*m.k], &acc)
+				if useVNNI {
+					dot4vnniFast(q[r*m.k:r*m.k+m.k], m.w[c0*m.k:(c0+4)*m.k], &acc)
 				} else {
-					for j := 0; j < nc; j++ {
-						acc[j] = dot(a, m.w[(c0+j)*m.k:(c0+j+1)*m.k])
+					a := s[r*m.k : r*m.k+m.k]
+					if nc == 4 {
+						dot4(a, m.w[c0*m.k:(c0+4)*m.k], &acc)
+					} else {
+						for j := 0; j < nc; j++ {
+							acc[j] = dot(a, m.w[(c0+j)*m.k:(c0+j+1)*m.k])
+						}
 					}
 				}
 				for j := 0; j < nc; j++ {
 					c := c0 + j
 					wz := m.zp[c]
-					v := acc[j] + 128*m.sum[c] - wz*xsum[r] - xz*m.sum[c] + int32(m.k)*xz*wz
+					var v int32
+					if useVNNI {
+						v = acc[j] - wz*xsum[r] - xz*m.sum[c] + int32(m.k)*xz*wz
+					} else {
+						v = acc[j] + 128*m.sum[c] - wz*xsum[r] - xz*m.sum[c] + int32(m.k)*xz*wz
+					}
 					out[r*m.n+c] = float32(v) * (xs * m.scale[c])
 				}
 			}

@@ -19,6 +19,9 @@ func mix32(c, p, v *float32, n int)
 func dot4avx2(a, b *int8, k int, out *[4]int32)
 
 //go:noescape
+func dot4vnni(a *uint8, b *int8, k int, out *[4]int32)
+
+//go:noescape
 func scoresAVX2(q, kt *float32, np int, out *float32)
 
 //go:noescape
@@ -49,10 +52,14 @@ var avxK = func() (k [23][8]uint32) {
 // useAVX2 says the kernels below run on AVX2: a var for tests.
 var useAVX2 = cpu.X86.HasAVX2
 
+// useAVX512VNNI says dot4vnni runs: a var for tests.
+var useAVX512VNNI = cpu.X86.HasAVX512VNNI
+
 func init() { pickKernels() }
 
 // pickKernels sets the fast kernels for this CPU.
 func pickKernels() {
+	dot4vnniFast = nil
 	dot4fast = func(a, b []int8, out *[4]int32) {
 		_ = b[4*len(a)-1]
 		dot4sse(&a[0], &b[0], len(a), out)
@@ -66,6 +73,12 @@ func pickKernels() {
 		mix32(&c[0], &p[0], &v[0], len(p))
 	}
 	expSubFast, geluFast = nil, nil
+	if useAVX512VNNI {
+		dot4vnniFast = func(a []uint8, b []int8, out *[4]int32) {
+			_ = b[4*len(a)-1]
+			dot4vnni(&a[0], &b[0], len(a), out)
+		}
+	}
 	// AVX2 (Haswell, Zen and later): twice the lanes for the int8 dot
 	// products, the scores, the softmax's exponentials and the GELU, where
 	// a 2-core server read 4 KB of a tool result in about 4 s on SSE2

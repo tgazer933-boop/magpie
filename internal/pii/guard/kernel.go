@@ -7,6 +7,11 @@ import "math"
 // len(a) a multiple of 32.
 var dot4fast func(a, b []int8, out *[4]int32)
 
+// dot4vnniFast is dot4fast for AVX512 VNNI: out[j] is the dot product of
+// the raw uint8 activations in a with b[j*len(a):(j+1)*len(a)], for len(a)
+// a multiple of 64.
+var dot4vnniFast func(a []uint8, b []int8, out *[4]int32)
+
 // dot4 is dot4fast, or the same in Go.
 func dot4(a, b []int8, out *[4]int32) {
 	k := len(a)
